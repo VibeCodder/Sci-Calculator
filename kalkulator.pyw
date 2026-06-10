@@ -228,6 +228,9 @@ class Renderer:
         self.scale = scale
         self.blink_visible = blink_visible
         self._lbl_cache = {}
+        # List of (tok, slot_spec, x0, y0, x1, y1) for mouse hit-testing.
+        # slot_spec is "num"/"den" for FracToken, or int slot_idx for ExprToken.
+        self.slot_hit_areas = []
 
     def fs(self, base):
         """Scaled font size (min 6)."""
@@ -360,6 +363,11 @@ class Renderer:
                 fill="#003040", outline=ACCENT, width=1
             )
 
+        # Record hit area for numerator slot (for mouse click detection)
+        self.slot_hit_areas.append((tok, "num",
+                                    num_x - 2, num_cy - num_h // 2 - 1,
+                                    num_x + num_w + 2, num_cy + num_h // 2 + 1))
+
         num_cursor    = tok.cursor if num_active else None
         num_active_et = tok if num_active else (editing_token if num_has_editor else None)
         self._draw_slot_tokens(tok.num, num_active_et, num_cursor,
@@ -377,6 +385,11 @@ class Renderer:
                 den_x + den_w + 2, den_cy + den_h // 2 + 1,
                 fill="#003040", outline=ACCENT, width=1
             )
+
+        # Record hit area for denominator slot
+        self.slot_hit_areas.append((tok, "den",
+                                    den_x - 2, den_cy - den_h // 2 - 1,
+                                    den_x + den_w + 2, den_cy + den_h // 2 + 1))
         den_cursor    = tok.cursor if den_active else None
         den_active_et = tok if den_active else (editing_token if den_has_editor else None)
         self._draw_slot_tokens(tok.den, den_active_et, den_cursor,
@@ -518,7 +531,7 @@ class Renderer:
         _, lh = self.measure("0", self.font_expr())
         _, sh = self.measure("0", ff)
 
-        def draw_slot(sx, sy, slot_tokens, is_active, use_font=None):
+        def draw_slot(sx, sy, slot_tokens, is_active, use_font=None, slot_idx=0):
             use_font = use_font or ff
             s_str, sw, sbh = self._slot_display(slot_tokens, is_active, use_font)
             box_w = sw + SP * 2
@@ -529,6 +542,8 @@ class Renderer:
             fill_clr = "#003040" if is_active else ""
             self.cv.create_rectangle(bx0, by0, bx1, by1,
                                      outline=clr, fill=fill_clr, width=1)
+            # Record hit area for this slot (for mouse click detection)
+            self.slot_hit_areas.append((tok, slot_idx, bx0, by0, bx1, by1))
             # draw tokens inside slot:
             # - cursor is shown only when tok is the DIRECT editing_token (not deeper)
             # - if a deeper token is active, pass editing_token (not tok) so the
@@ -583,7 +598,7 @@ class Renderer:
             lw, _ = self.measure(label, ff)
             self.cv.create_text(x + lw // 2, cy, text=label, font=ff, fill=FG, anchor="center")
             x += lw + GAP
-            sw = draw_slot(x, cy, tok.slots[0], is_slot_active(0))
+            sw = draw_slot(x, cy, tok.slots[0], is_slot_active(0), slot_idx=0)
             return x + sw
 
         elif style == "abs":
@@ -594,6 +609,8 @@ class Renderer:
             clr = ACCENT if is_slot_active(0) else FG_DIM
             self.cv.create_line(x + bar_w // 2, by0, x + bar_w // 2, by1, fill=clr, width=2)
             x += bar_w + 1
+            # Record hit area for abs slot
+            self.slot_hit_areas.append((tok, 0, x, by0, x + sw0, by1))
             self._draw_slot_tokens(
                 tok.slots[0],
                 tok if is_slot_active(0) and tok == editing_token else None,
@@ -608,14 +625,14 @@ class Renderer:
             lw, _ = self.measure(label, ff)
             self.cv.create_text(x + lw // 2, cy, text=label, font=ff, fill=FG, anchor="center")
             x += lw + GAP
-            sw = draw_slot(x, cy, tok.slots[0], is_slot_active(0))
+            sw = draw_slot(x, cy, tok.slots[0], is_slot_active(0), slot_idx=0)
             x += sw
             ew, _ = self.measure("!", ff)
             self.cv.create_text(x + ew // 2, cy, text="!", font=ff, fill=FG, anchor="center")
             return x + ew
 
         elif style == "pow2":
-            sw = draw_slot(x, cy, tok.slots[0], is_slot_active(0))
+            sw = draw_slot(x, cy, tok.slots[0], is_slot_active(0), slot_idx=0)
             x += sw
             supw, _ = self.measure("²", fsup)
             self.cv.create_text(x + supw // 2, cy - sh // 2, text="²",
@@ -624,10 +641,11 @@ class Renderer:
 
         elif style in ("pown", "prefix_exp", "prefix_sup"):
             if style == "pown":
-                sw0 = draw_slot(x, cy, tok.slots[0], is_slot_active(0))
+                sw0 = draw_slot(x, cy, tok.slots[0], is_slot_active(0), slot_idx=0)
                 x += sw0
                 s1_tokens = tok.slots[1]
                 active_s1 = is_slot_active(1)
+                s1_idx = 1
             else:
                 base_label = "e" if style == "prefix_exp" else label
                 ew, _ = self.measure(base_label, ff)
@@ -635,6 +653,7 @@ class Renderer:
                 x += ew
                 s1_tokens = tok.slots[0]
                 active_s1 = is_slot_active(0)
+                s1_idx = 0
 
             _, sw1_h, _ = self._slot_display_dims(s1_tokens, active_s1, fsup)
             s_str, sw1, _ = self._slot_display(s1_tokens, active_s1, fsup)
@@ -644,6 +663,8 @@ class Renderer:
             bx1 = x + box_w1; by1 = cy - sh // 2
             clr1 = ACCENT if active_s1 else FG_DIM
             self.cv.create_rectangle(bx0, by0, bx1, by1, outline=clr1, fill="", width=1)
+            # Record hit area for superscript slot
+            self.slot_hit_areas.append((tok, s1_idx, bx0, by0, bx1, by1))
             self._draw_slot_tokens(
                 s1_tokens,
                 tok if (active_s1 and tok == editing_token) else None,
@@ -659,6 +680,8 @@ class Renderer:
             bx1_0 = x + box_w0; by1_0 = cy - sh // 2
             clr0 = ACCENT if is_slot_active(0) else FG_DIM
             self.cv.create_rectangle(bx0_0, by0_0, bx1_0, by1_0, outline=clr0, fill="", width=1)
+            # Record hit area for root-index slot
+            self.slot_hit_areas.append((tok, 0, bx0_0, by0_0, bx1_0, by1_0))
             self._draw_slot_tokens(
                 tok.slots[0],
                 tok if (is_slot_active(0) and tok == editing_token) else None,
@@ -669,7 +692,7 @@ class Renderer:
             sqw, _ = self.measure("√", ff)
             self.cv.create_text(x + sqw // 2, cy, text="√", font=ff, fill=FG, anchor="center")
             x += sqw + GAP
-            sw1 = draw_slot(x, cy, tok.slots[1], is_slot_active(1))
+            sw1 = draw_slot(x, cy, tok.slots[1], is_slot_active(1), slot_idx=1)
             return x + sw1
 
         elif style == "prefix_sub":
@@ -682,6 +705,8 @@ class Renderer:
             bx1_s = x + box_w0; by1_s = cy + llh // 4 + box_h0
             clr0 = ACCENT if is_slot_active(0) else FG_DIM
             self.cv.create_rectangle(bx0_s, by0_s, bx1_s, by1_s, outline=clr0, fill="", width=1)
+            # Record hit area for subscript slot
+            self.slot_hit_areas.append((tok, 0, bx0_s, by0_s, bx1_s, by1_s))
             self._draw_slot_tokens(
                 tok.slots[0],
                 tok if (is_slot_active(0) and tok == editing_token) else None,
@@ -689,7 +714,7 @@ class Renderer:
                 bx0_s + SP, (by0_s + by1_s) // 2, fsup
             )
             x += box_w0 + GAP
-            sw1 = draw_slot(x, cy, tok.slots[1], is_slot_active(1))
+            sw1 = draw_slot(x, cy, tok.slots[1], is_slot_active(1), slot_idx=1)
             return x + sw1
 
         else:
@@ -742,8 +767,19 @@ class ExprDisplay(tk.Frame):
         self._blink_id      = None
         self._editing_token = None
         self._rects         = []
+        self._slot_hit_areas = []   # [(tok, slot_spec, x0, y0, x1, y1)]
         self._in_redraw     = False
         self._configure_after_id = None
+
+        # Selection: token-index range [_sel_a, _sel_b) in _rects.
+        # Both None = no selection.
+        self._sel_a         = None
+        self._sel_b         = None
+        self._drag_anchor   = None   # token index where drag started
+
+        # Callbacks wired by Calculator
+        self.on_click_pos   = None   # fn(gap_idx, mx) — gap cursor position
+        self.on_sel_change  = None   # fn(a, b) — token range selected
 
         self._canvas = tk.Canvas(self, bg=DISP_BG, highlightthickness=0,
                                  scrollregion=(0, 0, 2000, 200))
@@ -751,8 +787,10 @@ class ExprDisplay(tk.Frame):
         self.rowconfigure(0, weight=1)
         self.columnconfigure(0, weight=1)
 
-        self._canvas.bind("<Button-1>", self._on_click)
-        self._canvas.bind("<Configure>", self._on_canvas_configure)
+        self._canvas.bind("<Button-1>",       self._on_press)
+        self._canvas.bind("<B1-Motion>",      self._on_drag)
+        self._canvas.bind("<ButtonRelease-1>",self._on_release)
+        self._canvas.bind("<Configure>",      self._on_canvas_configure)
         self._start_blink()
 
     def attach_scrollbars(self, hbar, vbar):
@@ -776,13 +814,16 @@ class ExprDisplay(tk.Frame):
         self._redraw()
 
     # ── Public API ─────────────────────────────────────────────────────────────
-    def set_tokens(self, tokens, cursor=None, editing_token=None):
+    def set_tokens(self, tokens, cursor=None, editing_token=None,
+                   sel_a=None, sel_b=None):
         self._tokens = tokens
         self._editing_token = editing_token
         if cursor is None:
             self._cursor = len(tokens)
         else:
             self._cursor = max(0, min(len(tokens), cursor))
+        self._sel_a = sel_a
+        self._sel_b = sel_b
         self._blink_visible = True
         self._redraw()
 
@@ -828,9 +869,6 @@ class ExprDisplay(tk.Frame):
         vpad   = renderer.sp(renderer.PAD_Y)
         expr_h = self._estimate_expr_height(renderer, self._tokens)
 
-        # _estimate_expr_height now returns total height (above+below).
-        # We need cy such that there's at least vpad above the top of the expression.
-        # Since the expression is symmetric around cy, above ≈ expr_h // 2.
         above_axis = expr_h // 2
         draw_h = max(ch, expr_h + vpad * 2)
         cy = max(above_axis + vpad, draw_h // 2)
@@ -843,9 +881,27 @@ class ExprDisplay(tk.Frame):
             self._tokens, self._cursor, cursor_active, x_start, cy,
             editing_token=self._editing_token
         )
+        # Save slot hit areas for mouse click detection
+        self._slot_hit_areas = renderer.slot_hit_areas
 
-        # Update scrollregion only when it actually changes — avoids
-        # triggering a Configure cascade that makes the window vibrate
+        # Draw selection highlight behind tokens (draw before tokens in next pass
+        # — since canvas items are layered, we add the highlight rectangle now and
+        # it will appear below text drawn by draw_tokens, but draw_tokens has
+        # already run.  We lower it below everything else.)
+        if (self._sel_a is not None and self._sel_b is not None
+                and self._sel_a < self._sel_b
+                and self._sel_b <= len(self._rects)):
+            rx0 = self._rects[self._sel_a][0]
+            rx1 = self._rects[self._sel_b - 1][1]
+            sel_h = max(expr_h, renderer.sp(renderer.BASE_EXPR)) + vpad
+            rect_id = cv.create_rectangle(
+                rx0 - 2, cy - sel_h // 2,
+                rx1 + 2, cy + sel_h // 2,
+                fill="#1a4060", outline=ACCENT, width=1
+            )
+            cv.lower(rect_id)   # push behind all drawn tokens
+
+        # Update scrollregion only when it actually changes
         content_w = max(new_x + renderer.sp(renderer.PAD_X), cw)
         content_h = max(draw_h, ch)
         new_sr = (0, 0, content_w, content_h)
@@ -859,8 +915,8 @@ class ExprDisplay(tk.Frame):
 
     def _estimate_expr_height(self, renderer, tokens):
         """Estimate pixel height of a token list (for scrollregion / centring).
-        Returns (above_axis, below_axis) — how far the expression extends above
-        and below the math axis (cy).  Total height = above + below.
+        Returns total pixel height of the expression.
+        The math axis (cy) sits at above_axis pixels from the top.
         For simple text the axis sits at mid-height, so above=below=fh//2.
         """
         _, base_fh = renderer.measure("0", renderer.font_expr())
@@ -872,19 +928,26 @@ class ExprDisplay(tk.Frame):
             if isinstance(tok, FracToken):
                 num_tokens = tok.num if tok.num else []
                 den_tokens = tok.den if tok.den else []
-                nh = self._estimate_expr_height(renderer, num_tokens) if num_tokens else frac_fh
-                dh = self._estimate_expr_height(renderer, den_tokens) if den_tokens else frac_fh
-                # num sits above axis: BAR_GAP + full num height
+                # _measure_slot returns (w, h) — use h for each slot
+                ff = renderer.font_frac()
+                nw, nh = renderer._measure_slot(num_tokens, False, ff) if num_tokens else renderer.measure("□", ff)
+                dw, dh = renderer._measure_slot(den_tokens, False, ff) if den_tokens else renderer.measure("□", ff)
+                # num sits above the bar: BAR_GAP + full numerator height
                 tok_above = BAR_GAP + nh
-                # den sits below axis: BAR_GAP + full den height
+                # den sits below the bar: BAR_GAP + full denominator height
                 tok_below = BAR_GAP + dh
                 above = max(above, tok_above)
                 below = max(below, tok_below)
             elif isinstance(tok, ExprToken):
+                ff = renderer.font_frac()
                 for slot in tok.slots:
-                    sh = self._estimate_expr_height(renderer, slot) if slot else frac_fh
-                    above = max(above, sh // 2 + renderer.sp(renderer.SLOT_PAD))
-                    below = max(below, sh // 2 + renderer.sp(renderer.SLOT_PAD))
+                    if slot:
+                        sw, sh = renderer._measure_slot(slot, False, ff)
+                    else:
+                        sw, sh = renderer.measure("□", ff)
+                    slot_half = sh // 2 + renderer.sp(renderer.SLOT_PAD)
+                    above = max(above, slot_half)
+                    below = max(below, slot_half)
         return above + below
 
     def _start_blink(self):
@@ -895,9 +958,18 @@ class ExprDisplay(tk.Frame):
         self._redraw()
         self._blink_id = self.after(530, self._blink)
 
-    def _on_click(self, ev):
-        # Convert canvas coords (accounting for scroll)
-        mx = self._canvas.canvasx(ev.x)
+    # ── Mouse helpers ──────────────────────────────────────────────────────────
+    def _mx_to_tok_idx(self, ev_x):
+        """Convert canvas pixel x → token index (0..len-1) or -1 if before all."""
+        mx = self._canvas.canvasx(ev_x)
+        for i, (x0, x1) in enumerate(self._rects):
+            if mx <= x1:
+                return i
+        return len(self._rects) - 1 if self._rects else -1
+
+    def _mx_to_gap(self, ev_x):
+        """Convert canvas pixel x → gap index (0..len), i.e. cursor position."""
+        mx = self._canvas.canvasx(ev_x)
         best_i = len(self._tokens)
         for i, (x0, x1) in enumerate(self._rects):
             if x0 <= mx <= x1:
@@ -907,9 +979,54 @@ class ExprDisplay(tk.Frame):
             elif mx < x0:
                 best_i = i
                 break
-        self._cursor = best_i
+        return best_i
+
+    def _hit_slot(self, ev_x, ev_y):
+        """Check if (ev_x, ev_y) falls inside any slot hit area.
+        Returns (tok, slot_spec) or (None, None)."""
+        mx = self._canvas.canvasx(ev_x)
+        my = self._canvas.canvasy(ev_y)
+        # Iterate in reverse so topmost/most-nested slots take priority
+        for tok, slot_spec, x0, y0, x1, y1 in reversed(self._slot_hit_areas):
+            if x0 <= mx <= x1 and y0 <= my <= y1:
+                return tok, slot_spec
+        return None, None
+
+    def _on_press(self, ev):
+        tok_idx = self._mx_to_tok_idx(ev.x)
+        gap     = self._mx_to_gap(ev.x)
+        self._drag_anchor = tok_idx
+        self._sel_a = None
+        self._sel_b = None
+        self._cursor = gap
         self._blink_visible = True
+        # Check if click landed inside a nested slot (FracToken num/den or ExprToken slot)
+        slot_tok, slot_spec = self._hit_slot(ev.x, ev.y)
+        if self.on_click_pos:
+            self.on_click_pos(gap, tok_idx, self._canvas.canvasx(ev.x),
+                              slot_tok, slot_spec)
         self._redraw()
+
+    def _on_drag(self, ev):
+        if self._drag_anchor is None:
+            return
+        tok_idx = self._mx_to_tok_idx(ev.x)
+        if tok_idx < 0:
+            return
+        a = min(self._drag_anchor, tok_idx)
+        b = max(self._drag_anchor, tok_idx) + 1  # exclusive end
+        if b > len(self._rects):
+            b = len(self._rects)
+        self._sel_a = a
+        self._sel_b = b
+        self._blink_visible = True
+        if self.on_sel_change:
+            self.on_sel_change(a, b)
+        self._redraw()
+
+    def _on_release(self, ev):
+        self._drag_anchor = None
+        # Selection stays until next press or action
 
 
 # ─── KALKULATOR ───────────────────────────────────────────────────────────────
@@ -924,6 +1041,10 @@ class Calculator:
 
         self._tokens  = []    # top-level token list
         self._cursor  = 0     # cursor in top-level list
+
+        # Selection (always in top-level list for now)
+        self._sel_a   = None  # inclusive start index
+        self._sel_b   = None  # exclusive end index
 
         # Navigation stack: list of (token, part_or_slot_idx)
         # When we enter a FracToken slot or ExprToken slot, we push the context.
@@ -1127,6 +1248,10 @@ class Calculator:
         self.expr_disp = ExprDisplay(disp)
         self.expr_disp.grid(row=1, column=0, sticky="nsew")
 
+        # Wire mouse callbacks
+        self.expr_disp.on_click_pos  = self._on_display_click
+        self.expr_disp.on_sel_change = self._on_display_sel
+
         # Scrollbars are siblings of ExprDisplay inside disp,
         # so their appearance/disappearance never resizes the canvas
         _hbar = ttk.Scrollbar(disp, orient="horizontal",
@@ -1323,10 +1448,81 @@ class Calculator:
         return "#{:02x}{:02x}{:02x}".format(
             min(r+25,255), min(g+25,255), min(b+25,255))
 
+    # ── Selection helpers ──────────────────────────────────────────────────────
+    def _clear_sel(self):
+        self._sel_a = None
+        self._sel_b = None
+
+    def _has_sel(self):
+        return (self._sel_a is not None and self._sel_b is not None
+                and self._sel_b > self._sel_a)
+
+    def _sel_tokens(self):
+        """Return a COPY of the selected token sublist."""
+        if not self._has_sel():
+            return []
+        return list(self._tokens[self._sel_a:self._sel_b])
+
+    def _delete_sel(self):
+        """Remove selected tokens from top-level list, set cursor to sel_a."""
+        if not self._has_sel():
+            return
+        del self._tokens[self._sel_a:self._sel_b]
+        self._cursor = self._sel_a
+        self._clear_sel()
+
+    # ── Mouse callbacks from ExprDisplay ──────────────────────────────────────
+    def _on_display_click(self, gap, tok_idx, mx, slot_tok=None, slot_spec=None):
+        """Called on mouse press (no drag).  gap = cursor gap position (0..len).
+        slot_tok / slot_spec are set when click landed inside a nested slot."""
+        self._clear_sel()
+
+        if slot_tok is not None:
+            # Click inside a FracToken or ExprToken slot — enter it
+            # First deactivate any previously active token
+            if self._active is not None:
+                self._active.editing = False
+                self._active = None
+            # Mark all ancestors as editing so highlight propagates
+            ancestor = self._find_parent(self._tokens, slot_tok)
+            while ancestor is not None:
+                ancestor.editing = True
+                ancestor = self._find_parent(self._tokens, ancestor)
+            # Activate the clicked token and move cursor to end of clicked slot
+            slot_tok.editing = True
+            self._active = slot_tok
+            if isinstance(slot_tok, FracToken):
+                slot_tok.part = slot_spec  # "num" or "den"
+                sl = slot_tok.num if slot_spec == "num" else slot_tok.den
+                slot_tok.cursor = len(sl)
+            elif isinstance(slot_tok, ExprToken):
+                slot_tok.slot_idx = slot_spec  # int
+                slot_tok.cursor = len(slot_tok.slots[slot_spec])
+        else:
+            # Click outside any slot — exit to top-level
+            if self._active is not None:
+                self._active.editing = False
+                self._active = None
+            self._cursor = gap
+        self._refresh()
+
+    def _on_display_sel(self, a, b):
+        """Called during drag.  a..b is the selected token range [a, b)."""
+        if self._active is not None:
+            self._active.editing = False
+            self._active = None
+        self._sel_a = a
+        self._sel_b = b
+        self._cursor = b   # cursor at end of selection
+
     # ── Refresh ────────────────────────────────────────────────────────────────
     def _refresh(self):
-        self.expr_disp.set_tokens(self._tokens, self._cursor,
-                                  editing_token=self._active)
+        self.expr_disp.set_tokens(
+            self._tokens, self._cursor,
+            editing_token=self._active,
+            sel_a=self._sel_a if self._active is None else None,
+            sel_b=self._sel_b if self._active is None else None,
+        )
 
     # ── Token evaluation strings ───────────────────────────────────────────────
     def _tokens_to_str(self):
@@ -1337,6 +1533,7 @@ class Calculator:
 
     # ── Navigation: Left ───────────────────────────────────────────────────────
     def _cur_left(self):
+        self._clear_sel()
         at = self._active
         if at is not None:
             if isinstance(at, FracToken):
@@ -1379,6 +1576,7 @@ class Calculator:
 
     # ── Navigation: Right ──────────────────────────────────────────────────────
     def _cur_right(self):
+        self._clear_sel()
         at = self._active
         if at is not None:
             if isinstance(at, FracToken):
@@ -1423,6 +1621,7 @@ class Calculator:
           dive into its top slot.
         - Otherwise: do nothing (no history scroll here).
         """
+        self._clear_sel()
         at = self._active
 
         if at is None:
@@ -1471,6 +1670,7 @@ class Calculator:
           nested token at the cursor position into its bottom slot.
         - Otherwise: do nothing.
         """
+        self._clear_sel()
         at = self._active
 
         if at is None:
@@ -1566,9 +1766,14 @@ class Calculator:
                 child.slot_idx = 1 if child.two_slots else 0
                 child.cursor = len(child.slots[child.slot_idx])
 
+
     # ── Insert: text token ────────────────────────────────────────────────────
     def _ins(self, tok_str):
-        """Insert a string token at the current position (top-level or inside slot)."""
+        """Insert a string token.  If there is a selection, replace it."""
+        # If text typed with selection → delete selection first
+        if self._has_sel() and self._active is None:
+            self._delete_sel()
+
         at = self._active
         if at is not None:
             if isinstance(at, FracToken):
@@ -1595,10 +1800,31 @@ class Calculator:
 
     # ── Insert: ExprToken ─────────────────────────────────────────────────────
     def _ins_expr(self, kind):
-        """Insert a new ExprToken. If inside a slot, insert into that slot."""
+        """Insert a new ExprToken.
+
+        If there is a top-level selection, the selected tokens become the
+        content of slot 0 of the new ExprToken (wrapping behaviour).
+        Otherwise, insert at cursor as before.
+        """
+        # ── Case 1: selection exists at top-level — wrap it ──────────────────
+        if self._has_sel() and self._active is None:
+            selected = self._sel_tokens()
+            insert_at = self._sel_a
+            self._delete_sel()          # removes tokens, sets cursor=insert_at
+            et = ExprToken(kind)
+            et.slots[0] = selected      # put selection into slot 0
+            et.editing  = True
+            et.slot_idx = 0
+            et.cursor   = len(selected) # cursor at end of filled slot
+            self._tokens.insert(insert_at, et)
+            self._cursor = insert_at + 1
+            self._active = et
+            self._refresh()
+            return
+
+        # ── Case 2: inside a nested slot ─────────────────────────────────────
         at = self._active
         if at is not None:
-            # Insert into active slot
             if isinstance(at, FracToken):
                 slot = at.num if at.part == "num" else at.den
                 et = ExprToken(kind)
@@ -1607,7 +1833,7 @@ class Calculator:
                 et.cursor   = 0
                 slot.insert(at.cursor, et)
                 at.cursor += 1
-                at.editing = True   # keep parent marked as editing so renderer activates its slot
+                at.editing = True
                 self._active = et
                 self._refresh()
                 return
@@ -1619,53 +1845,78 @@ class Calculator:
                 et.cursor   = 0
                 slot.insert(at.cursor, et)
                 at.cursor += 1
-                at.editing = True   # keep parent marked as editing so renderer activates its slot
+                at.editing = True
                 self._active = et
                 self._refresh()
                 return
 
-        # Top-level insert
+        # ── Case 3: top-level, no selection ──────────────────────────────────
         et = ExprToken(kind)
         et.editing  = True
         et.slot_idx = 0
         et.cursor   = 0
         self._tokens.insert(self._cursor, et)
-        self._cursor += 1  # cursor moves past, but we activate the token
+        self._cursor += 1
         self._active = et
         self._refresh()
 
     # ── Insert: FracToken ─────────────────────────────────────────────────────
     def _frac_new(self):
-        """Insert a new FracToken at current position (top-level or nested inside any slot)."""
+        """Insert a new FracToken.
+
+        If there is a top-level selection, the selected tokens become the
+        numerator of the new FracToken (wrapping behaviour).
+        """
+        # ── Case 1: selection exists — wrap into numerator ────────────────────
+        if self._has_sel() and self._active is None:
+            selected  = self._sel_tokens()
+            insert_at = self._sel_a
+            self._delete_sel()
+            ft = FracToken()
+            ft.num    = selected
+            ft.editing = True
+            ft.part   = "den"           # enter denominator (numerator is filled)
+            ft.cursor = 0
+            self._tokens.insert(insert_at, ft)
+            self._cursor = insert_at + 1
+            self._active = ft
+            self._refresh()
+            return
+
+        # ── Case 2: no selection ──────────────────────────────────────────────
         at = self._active
         ft = FracToken()
         ft.editing = True; ft.part = "num"; ft.cursor = 0
 
         if at is None:
-            # Top-level insert
             self._tokens.insert(self._cursor, ft)
             self._cursor += 1
             self._active = ft
             self._refresh()
             return
 
-        # Inside a slot (FracToken or ExprToken) — insert nested FracToken
         if isinstance(at, FracToken):
             slot = at.num if at.part == "num" else at.den
             slot.insert(at.cursor, ft)
             at.cursor += 1
-            at.editing = True   # keep parent active so renderer draws its slot border/cursor
+            at.editing = True
         elif isinstance(at, ExprToken):
             slot = at.slots[at.slot_idx]
             slot.insert(at.cursor, ft)
             at.cursor += 1
-            at.editing = True   # keep parent active so renderer draws its slot border/cursor
+            at.editing = True
 
         self._active = ft
         self._refresh()
 
     # ── Backspace ─────────────────────────────────────────────────────────────
     def _back(self):
+        # If there is a selection, delete it
+        if self._has_sel() and self._active is None:
+            self._delete_sel()
+            self._refresh()
+            return
+
         at = self._active
         if isinstance(at, FracToken):
             slot = at.num if at.part == "num" else at.den
@@ -1734,6 +1985,7 @@ class Calculator:
         self._tokens = []
         self._cursor = 0
         self._active = None
+        self._clear_sel()
         self.res_lbl.config(text="")
         self._res_frac_hide()
         self._refresh()
