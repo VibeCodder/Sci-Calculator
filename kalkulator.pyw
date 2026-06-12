@@ -209,7 +209,7 @@ class Renderer:
     BASE_SMALL = 12
     BASE_SUP   = 11
     SLOT_PAD   = 4
-    CURSOR_W   = 2
+    CURSOR_W   = 3
     PAD_X      = 15
     PAD_Y      = 10
 
@@ -294,7 +294,7 @@ class Renderer:
     # ── Fraction ──────────────────────────────────────────────────────────────
     def _draw_frac(self, tok, x, cy, editing_token):
         PAD = self.sp(6)
-        ff  = self.font_frac()
+        ff  = self.font_expr()   # num/den rendered at full expression size
 
         # Build display strings for num/den (may be nested sub-renders)
         num_w, num_h, den_w, den_h = self._measure_slot_pair(tok, editing_token)
@@ -385,7 +385,7 @@ class Renderer:
 
     def _measure_slot_pair(self, tok, editing_token):
         """Measure pixel sizes for numerator and denominator."""
-        ff = self.font_frac()
+        ff = self.font_expr()   # must match _draw_frac
         # A slot is "active" if tok itself is editing that part, or if editing_token is nested there
         def slot_active(part):
             if not tok.editing:
@@ -431,7 +431,8 @@ class Renderer:
                 total_w += tw
                 max_h = max(max_h, th)
             elif isinstance(t, FracToken):
-                sub_ff = ("Consolas", max(6, round(14 * sub_scale)), "bold")
+                # Use same font_expr size for nested fractions
+                sub_ff = ("Consolas", max(6, round(24 * sub_scale)), "bold")
                 nw, nh = self._measure_slot(t.num, False, sub_ff)
                 dw, dh = self._measure_slot(t.den, False, sub_ff)
                 PAD = self.sp(6)
@@ -742,7 +743,7 @@ class _CursorOnlyRenderer:
     for the currently active (editing) token. All canvas items are tagged
     "cursor" so they can be added/removed independently of the static content.
     """
-    CURSOR_W = 2
+    CURSOR_W = 3
 
     def __init__(self, canvas, scale):
         self.cv    = canvas
@@ -771,7 +772,7 @@ class _CursorOnlyRenderer:
 
     def _line(self, x, cy, half_h):
         item = self.cv.create_line(x, cy - half_h, x, cy + half_h,
-                                   fill=ACCENT, width=self.CURSOR_W)
+                                   fill=FG, width=self.CURSOR_W)
         self.cv.itemconfig(item, tags="cursor")
 
     def draw_cursor_nested(self, tokens, top_cursor, x_start, cy, editing_token):
@@ -802,21 +803,25 @@ class _CursorOnlyRenderer:
 class _CursorTagRenderer(Renderer):
     """Like Renderer but ONLY draws cursor lines (tagged 'cursor').
     All other canvas drawing (text, rectangles, non-cursor lines) is
-    suppressed so this renderer never overwrites the static content layer."""
+    suppressed so this renderer never overwrites the static content layer.
 
-    def __init__(self, canvas, scale):
+    Kluczowa zasada: prawdziwa metoda canvas.create_line jest zapisywana
+    RAZ przy __init__ przed jakimkolwiek monkey-patchingiem. Sub-renderery
+    tworzone wewnątrz patched-canvas dostają ją przez argument _real_line.
+    """
+
+    def __init__(self, canvas, scale, _real_line=None):
         super().__init__(canvas, scale, blink_visible=True)
-
-    # ── Suppress all non-cursor canvas drawing ────────────────────────────────
-    # We monkey-patch the canvas methods temporarily so that inherited
-    # _draw_frac / _draw_expr calls produce NO visual output — they just
-    # walk the token tree to compute geometry (which we need for cursor pos).
+        # Zapisz prawdziwą create_line PRZED patchingiem.
+        # Gdy sub-renderer powstaje wewnątrz draw_tokens (canvas już patchowany),
+        # dostaje ją z zewnątrz przez _real_line.
+        self._real_line = _real_line if _real_line is not None else canvas.create_line
 
     def _cursor_line(self, x, cy, half_h):
         """Emit one cursor line item tagged 'cursor'."""
-        item = self._cv_create_line_real(
+        item = self._real_line(
             x, cy - half_h, x, cy + half_h,
-            fill=ACCENT, width=self.CURSOR_W
+            fill=FG, width=self.CURSOR_W
         )
         self.cv.itemconfig(item, tags="cursor")
 
@@ -831,25 +836,21 @@ class _CursorTagRenderer(Renderer):
 
     def draw_tokens(self, tokens, cursor_pos, cursor_active, x, cy, editing_token=None):
         """Run full geometry walk with canvas drawing suppressed, then restore."""
-        # Stash real canvas methods and replace with no-ops
-        self._cv_create_text_real      = self.cv.create_text
-        self._cv_create_rectangle_real = self.cv.create_rectangle
-        self._cv_create_line_real      = self.cv.create_line
+        _orig_text = self.cv.create_text
+        _orig_rect = self.cv.create_rectangle
+        _orig_line = self.cv.create_line
 
         self.cv.create_text      = lambda *a, **kw: None
         self.cv.create_rectangle = lambda *a, **kw: None
-        # Lines are suppressed too; draw_cursor_line / _cursor_line bypass
-        # this suppression by calling _cv_create_line_real directly.
         self.cv.create_line      = lambda *a, **kw: None
 
         try:
             return super().draw_tokens(tokens, cursor_pos, cursor_active, x, cy,
                                        editing_token=editing_token)
         finally:
-            # Always restore real canvas methods
-            self.cv.create_text      = self._cv_create_text_real
-            self.cv.create_rectangle = self._cv_create_rectangle_real
-            self.cv.create_line      = self._cv_create_line_real
+            self.cv.create_text      = _orig_text
+            self.cv.create_rectangle = _orig_rect
+            self.cv.create_line      = _orig_line
 
     def _draw_slot_tokens(self, tokens, active_frac_token, cursor_pos, x_start, cy, font):
         """Walk slot tokens for geometry; only emit cursor lines."""
@@ -863,21 +864,30 @@ class _CursorTagRenderer(Renderer):
                 self._cursor_line(x_start, cy, half_h)
             return
 
-        has_complex = any(isinstance(t, (FracToken, ExprToken)) for t in tokens)
-        if has_complex:
-            sub = _CursorTagRenderer(self.cv, self.scale)
-            sub.draw_tokens(tokens, cursor_pos if is_active else None,
-                            show_cursor, x_start, cy,
-                            editing_token=active_frac_token)
-        else:
-            x = x_start
-            for i, t in enumerate(tokens):
-                if show_cursor and i == cursor_pos:
-                    self._cursor_line(x, cy, half_h)
+        # Przechodzimy token po tokenie mierząc szerokości.
+        # Kursor MIĘDZY tokenami rysujemy sami (w tym przed/za FracToken/ExprToken).
+        # Kursor WEWNĄTRZ FracToken/ExprToken delegujemy do sub-renderera.
+        x = x_start
+        for i, t in enumerate(tokens):
+            if show_cursor and i == cursor_pos:
+                self._cursor_line(x, cy, half_h)
+
+            if isinstance(t, (FracToken, ExprToken)):
+                # Deleguj rysowanie kursora wewnątrz tokena przez editing_token.
+                # cursor_pos=None bo nie szukamy pozycji między tokenami sub-listy
+                # — to już obsłużone wyżej (i == cursor_pos).
+                sub = _CursorTagRenderer(self.cv, self.scale,
+                                         _real_line=self._real_line)
+                sub.draw_tokens([t], None, False, x, cy,
+                                editing_token=active_frac_token)
+                tw, _ = self._measure_slot([t], False, font)
+                x += tw
+            else:
                 tw, _ = self.measure(t, font)
                 x += tw
-            if show_cursor and cursor_pos == len(tokens):
-                self._cursor_line(x, cy, half_h)
+
+        if show_cursor and cursor_pos == len(tokens):
+            self._cursor_line(x, cy, half_h)
 
 
 # ─── WYŚWIETLACZ TOKENOWY + SCROLL + ZOOM ─────────────────────────────────────
@@ -1079,7 +1089,7 @@ class ExprDisplay(tk.Frame):
             else:
                 cx_x = x_start
             item = cv.create_line(cx_x, cy - half_h, cx_x, cy + half_h,
-                                  fill=ACCENT, width=renderer.CURSOR_W)
+                                  fill=FG, width=renderer.CURSOR_W)
             cv.itemconfig(item, tags="cursor")
         else:
             # Nested cursor — use a CursorOnlyRenderer that only draws cursor lines
@@ -1105,7 +1115,7 @@ class ExprDisplay(tk.Frame):
                 num_tokens = tok.num if tok.num else []
                 den_tokens = tok.den if tok.den else []
                 # _measure_slot returns (w, h) — use h for each slot
-                ff = renderer.font_frac()
+                ff = renderer.font_expr()   # must match _draw_frac / _measure_slot_pair
                 nw, nh = renderer._measure_slot(num_tokens, False, ff) if num_tokens else renderer.measure("□", ff)
                 dw, dh = renderer._measure_slot(den_tokens, False, ff) if den_tokens else renderer.measure("□", ff)
                 # num sits above the bar: BAR_GAP + full numerator height
@@ -1115,7 +1125,7 @@ class ExprDisplay(tk.Frame):
                 above = max(above, tok_above)
                 below = max(below, tok_below)
             elif isinstance(tok, ExprToken):
-                ff = renderer.font_frac()
+                ff = renderer.font_expr()   # main slots at full size
                 for slot in tok.slots:
                     if slot:
                         sw, sh = renderer._measure_slot(slot, False, ff)
