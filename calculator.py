@@ -4,6 +4,7 @@ import tkinter as tk
 from tkinter import ttk
 import math
 import re
+import copy
 from fractions import Fraction
 
 # ─── KOLORY ───────────────────────────────────────────────────────────────────
@@ -1471,6 +1472,11 @@ class Calculator:
         # Currently editing token (top of stack or None)
         self._active = None   # FracToken | ExprToken | None
 
+        # Undo / redo history: stacks of state snapshots (see _snapshot/_restore)
+        self._undo_stack = []
+        self._redo_stack = []
+        self._undo_limit = 200
+
         root.title("Kalkulator Naukowy")
         root.configure(bg="#000000")
         root.resizable(True, True)
@@ -1597,27 +1603,40 @@ class Calculator:
 
     # ── Right-operand collection ───────────────────────────────────────────────
     def _collect_right_operand(self, slot, cursor):
-        """Return the list of tokens that form a single operand immediately to
-        the right of `cursor` in `slot`, or [] if there is nothing collectable.
+        """Return the list of tokens that form the operand immediately to
+        the right of `cursor` in `slot` — the ENTIRE multiplicative chain
+        starting at `cursor` (mirrors _collect_left_operand), or [] if there
+        is nothing collectable.
 
-        Rules:
-        - If the token at cursor is a FracToken or ExprToken → return [that token].
-        - If the token at cursor is a string that opens a parenthesised group
-          (i.e. it is exactly "(") → collect everything up to and including the
-          matching closing ")", returning all those string tokens.
-        - Otherwise (plain number/symbol string) → collect that single token.
+        Each factor is one of:
+        - a single FracToken or ExprToken,
+        - an opening-parenthesis group "( ... )",
+        - a contiguous run of number/symbol string-tokens.
+        Walking stops at an operator character, a closing paren not part of
+        a matched group, or the end of `slot`.
         """
-        if cursor >= len(slot):
-            return []
-        tok = slot[cursor]
-        if isinstance(tok, (FracToken, ExprToken)):
-            return [tok]
-        if isinstance(tok, str):
-            if tok == "(":
-                # collect until matching ")"
+        def _is_number_like(t):
+            if not isinstance(t, str):
+                return False
+            if t in ("(", ")"):
+                return False
+            if all(c in self._OPERATORS for c in t):
+                return False
+            return True
+
+        pos = cursor
+        n = len(slot)
+        while pos < n:
+            tok = slot[pos]
+
+            if isinstance(tok, (FracToken, ExprToken)):
+                pos += 1
+                continue
+
+            if isinstance(tok, str) and tok == "(":
                 depth = 0
-                end = cursor
-                for i in range(cursor, len(slot)):
+                end = pos
+                for i in range(pos, n):
                     t = slot[i]
                     if isinstance(t, str):
                         for ch in t:
@@ -1628,10 +1647,19 @@ class Calculator:
                     if depth == 0:
                         end = i
                         break
-                return list(slot[cursor:end + 1])
-            else:
-                return [tok]
-        return []
+                pos = end + 1
+                continue
+
+            if isinstance(tok, str) and _is_number_like(tok):
+                end = pos + 1
+                while end < n and _is_number_like(slot[end]):
+                    end += 1
+                pos = end
+                continue
+
+            break
+
+        return list(slot[cursor:pos])
 
     # ── Left-operand collection ────────────────────────────────────────────────
     # Characters that are operators / separators — a run of these is NOT an operand.
@@ -1641,62 +1669,72 @@ class Calculator:
         """Return (tokens, start_index) for the operand immediately to the LEFT
         of `cursor` in `slot`, or ([], cursor) if nothing collectable.
 
-        An "operand" to the left is one of:
-        - A single FracToken or ExprToken immediately left of cursor.
-        - A closing-parenthesis group  "( ... )"  immediately left of cursor.
-        - A contiguous run of number/symbol string-tokens (digits, '.', pi,
-          epsilon, phi, 'e', constants -- anything that is NOT a pure operator
-          character and NOT an opening paren).  The run is collected backwards
-          until we hit an operator, an opening paren, a FracToken, or an
-          ExprToken.
+        An "operand" to the left is the ENTIRE multiplicative chain ending at
+        `cursor`: a contiguous run of factors, where each factor is one of
+        - a single FracToken or ExprToken,
+        - a closing-parenthesis group  "( ... )",
+        - a contiguous run of number/symbol string-tokens (digits, '.', pi,
+          epsilon, phi, 'e', constants),
+        with NO operator between consecutive factors (implicit adjacency).
+        Walking stops as soon as an operator character or an opening paren
+        (not part of a matched group) is hit, or the start of `slot` is
+        reached.
 
-        Operators (+ - * / div x %) and "(" are NOT collected.
+        Operators (+ - * / div x %) and a lone "(" are NOT collected.
         """
         if cursor <= 0:
             return [], cursor
-        left = slot[cursor - 1]
 
-        # FracToken / ExprToken
-        if isinstance(left, (FracToken, ExprToken)):
-            return [left], cursor - 1
+        def _is_number_like(t):
+            if not isinstance(t, str):
+                return False
+            if t in ("(", ")"):
+                return False
+            if all(c in self._OPERATORS for c in t):
+                return False
+            return True
 
-        # Closing-paren group
-        if isinstance(left, str) and left == ")":
-            depth = 0
-            start = cursor - 1
-            for i in range(cursor - 1, -1, -1):
-                t = slot[i]
-                if isinstance(t, str):
-                    for ch in reversed(t):
-                        if ch == ")":
-                            depth += 1
-                        elif ch == "(":
-                            depth -= 1
-                if depth == 0:
-                    start = i
-                    break
-            return list(slot[start:cursor]), start
+        pos = cursor
+        while pos > 0:
+            left = slot[pos - 1]
 
-        # Run of number / symbol string-tokens
-        if isinstance(left, str):
-            def _is_number_like(t):
-                if not isinstance(t, str):
-                    return False
-                if t in ("(", ")"):
-                    return False
-                if all(c in self._OPERATORS for c in t):
-                    return False
-                return True
+            # Factor: FracToken / ExprToken
+            if isinstance(left, (FracToken, ExprToken)):
+                pos -= 1
+                continue
 
-            if not _is_number_like(left):
-                return [], cursor
+            # Factor: closing-paren group "(...)"
+            if isinstance(left, str) and left == ")":
+                depth = 0
+                start = pos - 1
+                for i in range(pos - 1, -1, -1):
+                    t = slot[i]
+                    if isinstance(t, str):
+                        for ch in reversed(t):
+                            if ch == ")":
+                                depth += 1
+                            elif ch == "(":
+                                depth -= 1
+                    if depth == 0:
+                        start = i
+                        break
+                pos = start
+                continue
 
-            start = cursor - 1
-            while start > 0 and _is_number_like(slot[start - 1]):
-                start -= 1
-            return list(slot[start:cursor]), start
+            # Factor: run of number/symbol string-tokens
+            if isinstance(left, str) and _is_number_like(left):
+                start = pos - 1
+                while start > 0 and _is_number_like(slot[start - 1]):
+                    start -= 1
+                pos = start
+                continue
 
-        return [], cursor
+            # Anything else (operator, lone opening paren, ...) stops the chain
+            break
+
+        if pos == cursor:
+            return [], cursor
+        return list(slot[pos:cursor]), pos
 
     # ── build UI ──────────────────────────────────────────────────────────────
     def _build(self):
@@ -1959,6 +1997,11 @@ class Calculator:
         self.root.bind("<Control-0>",       lambda e: self.expr_disp.zoom_reset())
         self.root.bind("<Control-KP_Add>",  lambda e: self.expr_disp.zoom_in())
         self.root.bind("<Control-KP_Subtract>", lambda e: self.expr_disp.zoom_out())
+        self.root.bind("<Control-z>",       lambda e: (self._undo(), "break"))
+        self.root.bind("<Control-Z>",       lambda e: (self._undo(), "break"))
+        self.root.bind("<Control-Shift-Z>", lambda e: (self._redo(), "break"))
+        self.root.bind("<Control-y>",       lambda e: (self._redo(), "break"))
+        self.root.bind("<Control-Y>",       lambda e: (self._redo(), "break"))
 
     @staticmethod
     def _lighter(hex_col):
@@ -2290,6 +2333,7 @@ class Calculator:
     # ── Insert: text token ────────────────────────────────────────────────────
     def _ins(self, tok_str):
         """Insert a string token.  If there is a selection, replace it."""
+        self._push_undo()
         # If text typed with selection → delete selection first
         if self._has_sel() and self._active is None:
             self._delete_sel()
@@ -2339,6 +2383,7 @@ class Calculator:
         # land after insertion?
         # arg_slot  : index of the slot that receives the operand
         # edit_slot : slot_idx the token starts editing in (where cursor lands)
+        self._push_undo()
         if kind in ("loga", "xroot"):
             arg_slot  = 1   # operand → main argument slot
             edit_slot = 0   # cursor starts in the small subscript/index slot
@@ -2448,6 +2493,7 @@ class Calculator:
            (FracToken / ExprToken / closing-paren group), then RIGHT.
         """
         # ── Case 1: selection exists — wrap into numerator ────────────────────
+        self._push_undo()
         if self._has_sel() and self._active is None:
             selected  = self._sel_tokens()
             insert_at = self._sel_a
@@ -2545,11 +2591,16 @@ class Calculator:
     def _back(self):
         # If there is a selection, delete it
         if self._has_sel() and self._active is None:
+            self._push_undo()
             self._delete_sel()
             self._refresh()
             return
 
         at = self._active
+        if at is None and self._cursor == 0:
+            return  # nothing to delete — don't pollute the undo stack
+
+        self._push_undo()
         if isinstance(at, FracToken):
             slot = at.num if at.part == "num" else at.den
             if at.cursor > 0:
@@ -2614,6 +2665,7 @@ class Calculator:
                             return
 
     def _clear(self):
+        self._push_undo()
         self._tokens = []
         self._cursor = 0
         self._active = None
@@ -2621,6 +2673,100 @@ class Calculator:
         self.res_lbl.config(text="")
         self._res_frac_hide()
         self._refresh()
+
+    # ── Undo / redo ─────────────────────────────────────────────────────────
+    def _build_path(self, tokens, target):
+        """Return a path of (index, descend_key) steps from `tokens` down to
+        `target` (a FracToken/ExprToken instance living somewhere in the
+        tree), or None if not found. descend_key is None on the final step
+        (meaning: this index IS target), otherwise 'num'/'den'/0/1 telling
+        which child token-list to descend into next."""
+        if target is None:
+            return None
+
+        def rec(lst):
+            for i, t in enumerate(lst):
+                if t is target:
+                    return [(i, None)]
+                if isinstance(t, FracToken):
+                    sub = rec(t.num)
+                    if sub is not None:
+                        return [(i, "num")] + sub
+                    sub = rec(t.den)
+                    if sub is not None:
+                        return [(i, "den")] + sub
+                elif isinstance(t, ExprToken):
+                    sub = rec(t.slots[0])
+                    if sub is not None:
+                        return [(i, 0)] + sub
+                    sub = rec(t.slots[1])
+                    if sub is not None:
+                        return [(i, 1)] + sub
+            return None
+
+        return rec(tokens)
+
+    def _resolve_path(self, tokens, path):
+        """Inverse of _build_path: walk `path` inside `tokens` (a freshly
+        deep-copied tree) and return the corresponding token object, or None
+        if the path no longer resolves (should not normally happen)."""
+        if not path:
+            return None
+        lst = tokens
+        tok = None
+        for idx, key in path:
+            if idx >= len(lst):
+                return None
+            tok = lst[idx]
+            if key is None:
+                return tok
+            elif key == "num":
+                lst = tok.num
+            elif key == "den":
+                lst = tok.den
+            else:
+                lst = tok.slots[key]
+        return tok
+
+    def _snapshot(self):
+        return {
+            "tokens":      copy.deepcopy(self._tokens),
+            "cursor":      self._cursor,
+            "active_path": self._build_path(self._tokens, self._active),
+            "sel_a":       self._sel_a,
+            "sel_b":       self._sel_b,
+        }
+
+    def _restore(self, snap):
+        self._tokens = copy.deepcopy(snap["tokens"])
+        self._cursor = snap["cursor"]
+        self._sel_a  = snap["sel_a"]
+        self._sel_b  = snap["sel_b"]
+        self._active = self._resolve_path(self._tokens, snap["active_path"])
+        self._refresh()
+
+    def _push_undo(self):
+        """Call BEFORE any mutation, from top-level action handlers only
+        (_ins, _ins_expr, _frac_new, _back, _clear). Records the state as it
+        was just before the change, and clears the redo stack."""
+        self._undo_stack.append(self._snapshot())
+        if len(self._undo_stack) > self._undo_limit:
+            self._undo_stack.pop(0)
+        self._redo_stack.clear()
+
+    def _undo(self):
+        if not self._undo_stack:
+            return
+        self._redo_stack.append(self._snapshot())
+        snap = self._undo_stack.pop()
+        self._restore(snap)
+
+    def _redo(self):
+        if not self._redo_stack:
+            return
+        self._undo_stack.append(self._snapshot())
+        snap = self._redo_stack.pop()
+        self._restore(snap)
 
     def _toggle_angle(self):
         self.deg_mode = not self.deg_mode
